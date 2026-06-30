@@ -3,6 +3,7 @@ import os
 from .base import *
 
 DEBUG = True
+ACCOUNT_EMAIL_VERIFICATION = "none"
 SITE_DOMAIN = "localhost:8000"
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost").split(",")
 

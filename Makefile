@@ -26,3 +26,27 @@ migrate: ## Run migrations
 lint: ## Run the ruff linter.
 	ruff check --fix
 	ruff format
+
+# ── Production targets ──────────────────────────────────────────────
+
+PROD_COMPOSE = docker compose -f prod.docker-compose.yaml --env-file .env.production
+
+.PHONY: prod-build
+prod-build: ## Build production images
+	$(PROD_COMPOSE) build
+
+.PHONY: prod-up
+prod-up: ## Start production stack
+	$(PROD_COMPOSE) up -d
+
+.PHONY: prod-down
+prod-down: ## Stop production stack
+	$(PROD_COMPOSE) down
+
+.PHONY: prod-logs
+prod-logs: ## Tail production logs
+	$(PROD_COMPOSE) logs -f
+
+.PHONY: prod-migrate
+prod-migrate: ## Run migrations in production
+	$(PROD_COMPOSE) exec attendee-app-prod python manage.py migrate

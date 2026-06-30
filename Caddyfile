@@ -1,0 +1,5 @@
+# Replace attendee.example.com with your actual domain.
+# Caddy will automatically provision Let's Encrypt TLS certificates.
+attendee.example.com {
+    reverse_proxy localhost:8000
+}
