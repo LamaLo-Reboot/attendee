@@ -7,6 +7,7 @@ from .base import *
 from .base import LOG_FORMATTERS
 
 DEBUG = False
+ACCOUNT_EMAIL_VERIFICATION = os.getenv("ACCOUNT_EMAIL_VERIFICATION", "mandatory")
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
 
 DATABASES = {
