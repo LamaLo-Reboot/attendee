@@ -10,6 +10,9 @@ from datetime import timedelta
 
 import gi
 import redis
+from opentelemetry import trace
+
+from attendee.metrics import bots_failed
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.utils import timezone
@@ -86,6 +89,7 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class BotController:
@@ -595,6 +599,7 @@ class BotController:
             logger.info("Cleanup already called, exiting")
             return
         self.cleanup_called = True
+        self._otel_span.add_event("bot.cleanup_started")
 
         normal_quitting_process_worked = False
         import threading
@@ -646,16 +651,17 @@ class BotController:
             self.websocket_client_manager.cleanup()
 
         if self.get_recording_file_location():
-            self.upload_recording_to_external_media_storage_if_enabled()
+            with tracer.start_as_current_span("bot.upload_recording"):
+                self.upload_recording_to_external_media_storage_if_enabled()
 
-            logger.info("Telling file uploader to upload recording file...")
-            file_uploader = self.get_file_uploader()
-            file_uploader.upload_file(self.get_recording_file_location())
-            file_uploader.wait_for_upload()
-            logger.info("File uploader finished uploading file")
-            file_uploader.delete_file(self.get_recording_file_location())
-            logger.info("File uploader deleted file from local filesystem")
-            self.recording_file_saved(file_uploader.filename)
+                logger.info("Telling file uploader to upload recording file...")
+                file_uploader = self.get_file_uploader()
+                file_uploader.upload_file(self.get_recording_file_location())
+                file_uploader.wait_for_upload()
+                logger.info("File uploader finished uploading file")
+                file_uploader.delete_file(self.get_recording_file_location())
+                logger.info("File uploader deleted file from local filesystem")
+                self.recording_file_saved(file_uploader.filename)
 
         if self.bot_in_db.create_debug_recording():
             self.save_debug_recording()
@@ -692,6 +698,7 @@ class BotController:
         self.bot_in_db = Bot.objects.get(id=bot_id)
         self.cleanup_called = False
         self.run_called = False
+        self._otel_span = trace.get_current_span()
 
         self.redis_client = None
         self.pubsub = None
@@ -986,10 +993,12 @@ class BotController:
     def take_action_based_on_bot_in_db(self):
         if self.bot_in_db.state == BotStates.JOINING:
             logger.info("take_action_based_on_bot_in_db - JOINING")
+            self._otel_span.add_event("bot.state_action", {"bot.state": "JOINING"})
             BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
             self.adapter.init()
         if self.bot_in_db.state == BotStates.LEAVING:
             logger.info("take_action_based_on_bot_in_db - LEAVING")
+            self._otel_span.add_event("bot.state_action", {"bot.state": "LEAVING"})
             BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
             self.adapter.leave()
         if self.bot_in_db.state == BotStates.STAGED:
@@ -998,10 +1007,12 @@ class BotController:
         # App session states
         if self.bot_in_db.state == BotStates.CONNECTING:
             logger.info("take_action_based_on_bot_in_db - CONNECTING")
+            self._otel_span.add_event("bot.state_action", {"bot.state": "CONNECTING"})
             BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
             self.adapter.init()
         if self.bot_in_db.state == BotStates.DISCONNECTING:
             logger.info("take_action_based_on_bot_in_db - DISCONNECTING")
+            self._otel_span.add_event("bot.state_action", {"bot.state": "DISCONNECTING"})
             BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
             self.adapter.disconnect()
 
@@ -1133,6 +1144,9 @@ class BotController:
 
     def handle_glib_shutdown(self):
         logger.info("handle_glib_shutdown called")
+        self._otel_span.add_event("bot.fatal_error", {"reason": "process_terminated"})
+        self._otel_span.set_status(trace.StatusCode.ERROR, "process_terminated")
+        bots_failed.add(1, {"reason": "process_terminated"})
 
         try:
             BotEventManager.create_event(
@@ -1310,6 +1324,10 @@ class BotController:
             return False
 
     def handle_exception_in_timeout_callback(self, e):
+        self._otel_span.add_event("bot.fatal_error", {"reason": "internal_error", "error": str(e)})
+        self._otel_span.set_status(trace.StatusCode.ERROR, str(e))
+        self._otel_span.record_exception(e)
+        bots_failed.add(1, {"reason": "internal_error"})
         try:
             BotEventManager.create_event(
                 bot=self.bot_in_db,
@@ -1730,6 +1748,7 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.REQUEST_TO_JOIN_DENIED:
             logger.info("Received message that request to join was denied")
+            self._otel_span.add_event("bot.could_not_join", {"reason": "request_to_join_denied"})
             BotEventManager.create_event(
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.COULD_NOT_JOIN,
@@ -1740,6 +1759,7 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.COULD_NOT_CONNECT_TO_MEETING:
             logger.info("Received message that could not connect to meeting")
+            self._otel_span.add_event("bot.could_not_join", {"reason": "could_not_connect"})
             BotEventManager.create_event(
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.COULD_NOT_JOIN,
@@ -1750,6 +1770,7 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.BLOCKED_BY_CAPTCHA:
             logger.info("Received message that captcha/verification is required to join")
+            self._otel_span.add_event("bot.could_not_join", {"reason": "blocked_by_captcha"})
             BotEventManager.create_event(
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.COULD_NOT_JOIN,
@@ -1760,6 +1781,7 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.MEETING_NOT_FOUND:
             logger.info("Received message that meeting not found")
+            self._otel_span.add_event("bot.could_not_join", {"reason": "meeting_not_found"})
             BotEventManager.create_event(
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.COULD_NOT_JOIN,
@@ -1770,6 +1792,7 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.LOGIN_REQUIRED:
             logger.info("Received message that login required")
+            self._otel_span.add_event("bot.could_not_join", {"reason": "login_required"})
             BotEventManager.create_event(
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.COULD_NOT_JOIN,
@@ -1802,6 +1825,7 @@ class BotController:
             return
 
         if message.get("message") == BotAdapter.Messages.BLOCKED_BY_PLATFORM_REPEATEDLY:
+            self._otel_span.add_event("bot.blocked_by_platform")
             from bots.tasks.restart_bot_pod_task import restart_bot_pod
 
             bot_start_time = self.bot_in_db.join_at or self.bot_in_db.created_at
@@ -1893,6 +1917,7 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.MEETING_ENDED:
             logger.info("Received message that meeting ended")
+            self._otel_span.add_event("bot.meeting_ended")
             self.flush_utterances()
             if self.bot_in_db.state == BotStates.LEAVING:
                 new_bot_event = BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_LEFT_MEETING)
@@ -1997,6 +2022,7 @@ class BotController:
                 return
 
             logger.info("Received message that bot joined meeting")
+            self._otel_span.add_event("bot.joined_meeting")
             BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_JOINED_MEETING)
             return
 

@@ -7,7 +7,9 @@ import requests
 from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
+from opentelemetry import trace
 
+from attendee.metrics import webhook_delivery_duration, webhooks_delivered
 from bots.models import SessionTypes, WebhookDeliveryAttempt, WebhookDeliveryAttemptStatus, WebhookTriggerTypes
 from bots.redis_utils import incr_and_expire_nx
 from bots.webhook_utils import sign_payload, url_is_public
@@ -61,6 +63,12 @@ def deliver_webhook(self, delivery_id):
         raise  # Re-raises the original exception with preserved traceback
 
     subscription = delivery.webhook_subscription
+
+    # OTel span attributes
+    span = trace.get_current_span()
+    span.set_attribute("webhook.delivery_id", delivery_id)
+    span.set_attribute("webhook.url", subscription.url)
+    span.set_attribute("webhook.trigger", WebhookTriggerTypes.trigger_type_to_api_code(delivery.webhook_trigger_type))
 
     # If the subscription is no longer active, mark as failed and return
     if not subscription.is_active:
@@ -138,6 +146,7 @@ def deliver_webhook(self, delivery_id):
     delivery.last_attempt_at = timezone.now()
 
     # Send the webhook
+    delivery_start = time.monotonic()
     try:
         response = requests.post(
             subscription.url,
@@ -157,19 +166,26 @@ def deliver_webhook(self, delivery_id):
         response_body = response.text[:500]
         delivery.add_to_response_body_list(response_body)
 
+        span.set_attribute("webhook.status_code", response.status_code)
+        elapsed_ms = (time.monotonic() - delivery_start) * 1000
+
         # Check if the delivery was successful (2xx status code)
         if 200 <= response.status_code < 300:
             delivery.status = WebhookDeliveryAttemptStatus.SUCCESS
             delivery.succeeded_at = timezone.now()
             delivery.save()
+            webhooks_delivered.add(1)
+            webhook_delivery_duration.record(elapsed_ms)
             return
 
         # If we got here, the delivery failed with a non-2xx status code
         delivery.status = WebhookDeliveryAttemptStatus.FAILURE
+        span.set_status(trace.StatusCode.ERROR, f"HTTP {response.status_code}")
 
     except requests.RequestException as e:
         # Handle network errors, timeouts, etc.
         delivery.status = WebhookDeliveryAttemptStatus.FAILURE
+        span.set_status(trace.StatusCode.ERROR, str(e))
         error_response = {
             "status_code": None,  # No HTTP status since request failed
             "error_type": type(e).__name__,

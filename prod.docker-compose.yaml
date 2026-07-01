@@ -46,6 +46,8 @@ services:
     build: ./
     network_mode: host
     env_file: .env.production
+    environment:
+      - OTEL_SERVICE_NAME=attendee-app
     entrypoint: []
     command: >
       bash -c "python manage.py collectstatic --noinput &&
@@ -61,6 +63,8 @@ services:
     build: ./
     network_mode: host
     env_file: .env.production
+    environment:
+      - OTEL_SERVICE_NAME=attendee-worker
     command: "celery -A attendee worker -l INFO -Q celery,bot_launcher_vm"
     group_add:
       - "986"
@@ -77,6 +81,8 @@ services:
     build: ./
     network_mode: host
     env_file: .env.production
+    environment:
+      - OTEL_SERVICE_NAME=attendee-scheduler
     entrypoint: []
     command: "python manage.py run_scheduler"
     depends_on:

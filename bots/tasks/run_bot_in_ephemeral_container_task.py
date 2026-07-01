@@ -3,7 +3,10 @@ import os
 
 import docker
 from celery import shared_task
+from opentelemetry import trace
+from opentelemetry.propagate import inject
 
+from attendee.metrics import bots_launched
 from bots.models import Bot
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,11 @@ def run_bot_in_ephemeral_container(self, bot_id: int):
         # Image to use (same as worker)
         image = os.getenv("BOT_CONTAINER_IMAGE", "attendee-attendee-worker-local:latest")
 
+        # OTel span attributes
+        span = trace.get_current_span()
+        span.set_attribute("bot.id", bot_id)
+        span.set_attribute("container.image", image)
+
         # Copy all environment variables from worker to container
         # This ensures all env vars (DB, Redis, AWS, Deepgram, etc.) are automatically passed
         env_vars = os.environ.copy()
@@ -65,6 +73,13 @@ def run_bot_in_ephemeral_container(self, bot_id: int):
             "XDG_RUNTIME_DIR",  # Each container has its own runtime dir
         }
         env_vars = {k: v for k, v in env_vars.items() if k not in vars_to_exclude}
+
+        # Propagate OTel trace context to ephemeral container
+        carrier = {}
+        inject(carrier)
+        env_vars["OTEL_TRACE_PARENT"] = carrier.get("traceparent", "")
+        env_vars["OTEL_TRACE_STATE"] = carrier.get("tracestate", "")
+        env_vars["OTEL_SERVICE_NAME"] = "attendee-bot"
 
         # Resource limits per bot (configurable)
         mem_limit = os.getenv("BOT_MEMORY_LIMIT", "2g")  # 2GB default
@@ -127,6 +142,17 @@ def run_bot_in_ephemeral_container(self, bot_id: int):
 
         # Log container info and how to view logs
         log_instruction = f"View logs with: docker logs -f {container_name}" if not auto_remove else "Container will auto-remove when done. To keep containers, set BOT_CONTAINER_AUTO_REMOVE=false"
+
+        span.set_attribute("container.id", container.short_id)
+        span.set_attribute("container.name", container_name)
+        span.set_attribute("container.mem_limit", mem_limit)
+        span.set_attribute("container.running_count", current_running_count)
+        span.set_attribute("container.max_simultaneous", max_simultaneous_bots)
+
+        from bots.meeting_url_utils import meeting_type_from_url
+
+        platform = str(meeting_type_from_url(bot.meeting_url) or "unknown")
+        bots_launched.add(1, {"platform": platform})
 
         logger.info(f"Ephemeral container {container_name} (ID: {container.short_id}) started for bot {bot_id}. {log_instruction}")
 

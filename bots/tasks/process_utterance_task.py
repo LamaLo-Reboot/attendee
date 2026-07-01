@@ -5,6 +5,9 @@ import time
 
 import requests
 from celery import shared_task
+from opentelemetry import trace
+
+from attendee.metrics import transcription_completed
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +87,12 @@ def process_utterance(self, utterance_id):
     utterance = Utterance.objects.get(id=utterance_id)
     logger.info(f"Processing utterance {utterance_id}")
 
+    # OTel span attributes
+    span = trace.get_current_span()
+    span.set_attribute("utterance.id", utterance_id)
+    span.set_attribute("utterance.provider", str(utterance.transcription_provider))
+    span.set_attribute("utterance.bot_id", str(utterance.recording.bot.object_id))
+
     recording = utterance.recording
 
     if utterance.failure_data:
@@ -119,6 +128,7 @@ def process_utterance(self, utterance_id):
         utterance.save()
 
         logger.info(f"Transcription complete for utterance {utterance_id}")
+        transcription_completed.add(1, {"provider": str(utterance.transcription_provider)})
 
         # Don't send webhook for empty transcript or an async transcription
         if utterance.transcription.get("transcript") and utterance.async_transcription is None:

@@ -17,6 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from attendee.sentry import init_sentry
+from attendee.telemetry import init_telemetry
 
 load_dotenv()
 
@@ -343,3 +344,6 @@ if os.getenv("ENABLE_CSP", "false") == "true":
 
 # Initialize Sentry (only if SENTRY_DSN is set)
 init_sentry()
+
+# Initialize OpenTelemetry (only if OTEL_EXPORTER_OTLP_ENDPOINT is set)
+init_telemetry()
